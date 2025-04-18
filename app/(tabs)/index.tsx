@@ -15,6 +15,7 @@ import { DeviceType } from 'expo-device';
 import { Alert } from 'react-native';
 import SplashScreen from './components/splash-screen';
 import * as ExpoSplashScreen from 'expo-splash-screen';
+import NetInfo, { NetInfoState } from '@react-native-community/netinfo';
 
 function getDeviceTypeString(deviceType: DeviceType | null): string {
   switch (deviceType) {
@@ -56,10 +57,20 @@ export default function HomeScreen() {
   const [pairingCode, setPairingCode] = useState('');
   const [deviceStatus, setDeviceStatus] = useState({ registered: false, linked: false });
   const [isAppReady, setIsAppReady] = useState(false);
+  const [isConnected, setIsConnected] = useState<boolean | null>(true);
   const router = useRouter();
   const socketRef = React.useRef<Socket | null>(null);
   const [deviceInfo, setDeviceInfo] = useState<DeviceInfo>({});
 
+  useEffect(() => {
+    const unsubscribe = NetInfo.addEventListener((state: NetInfoState) => {
+      setIsConnected(state.isConnected);
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
 
   async function fetchDeviceInfo() {
     // Permissions
@@ -228,6 +239,16 @@ export default function HomeScreen() {
     return <SplashScreen />;
   }
 
+  if (!isConnected) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.offlineContainer}>
+          <Text style={styles.offlineText}>No Internet Connection</Text>
+          <Text style={styles.offlineSubText}>Please check your connection and try again</Text>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -370,5 +391,24 @@ const styles = StyleSheet.create({
     flex: 1,
     fontFamily: 'Poppins',
     fontSize: 13,
+  },
+  offlineContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#25293c',
+  },
+  offlineText: {
+    color: 'white',
+    fontSize: 24,
+    fontWeight: 'bold',
+    marginBottom: 8,
+    fontFamily: 'Poppins',
+  },
+  offlineSubText: {
+    color: '#8f9ab7',
+    fontSize: 16,
+    textAlign: 'center',
+    fontFamily: 'Poppins',
   },
 });

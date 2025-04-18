@@ -9,6 +9,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import React from 'react';
 import * as Animatable from 'react-native-animatable'; 
 import { useRouter } from 'expo-router';
+import * as FileSystem from 'expo-file-system';
 
 interface PlaylistItem {
   id: number;
@@ -52,6 +53,9 @@ const Explore = () => {
     errorCode: null
   });
 
+  const [downloadProgress, setDownloadProgress] = useState<{ [key: number]: number }>({});
+  const [downloadingItems, setDownloadingItems] = useState<number[]>([]);
+
   useEffect(() => {
     const fetchData = async () => {
       try {
@@ -84,6 +88,15 @@ const Explore = () => {
           const screenContentResponse = await axios.get(`https://staging.service.dscdn.salext.net/screen/get-screen-content-by-screen/${screen.id}`);
           let screenContent = screenContentResponse.data;
 
+          // If there's no screen content, clear the playlist items and return
+          if (!screenContent || screenContent.length === 0) {
+            setPlaylistItems([]);
+            setCurrentIndex(0);
+            setError({ generalError: null, technicalError: null, errorCode: null });
+            setIsLoading(false);
+            return;
+          }
+
           // Sort screen content by position
           screenContent = screenContent.sort((a: any, b: any) => a.position - b.position);
 
@@ -106,6 +119,11 @@ const Explore = () => {
 
                 if (isOnSchedule) {
                   const playlistMediaResponse = await axios.get(`https://staging.service.dscdn.salext.net/playlist-media/by-playlist/${playlistId}`);
+
+                  // If there's no media in the playlist, continue to next content
+                  if (!playlistMediaResponse.data || playlistMediaResponse.data.length === 0) {
+                    continue;
+                  }
 
                   // Sort playlist media by position
                   playlistMediaResponse.data.sort((a: any, b: any) => a.position - b.position);
@@ -132,7 +150,6 @@ const Explore = () => {
                         errorCode: `${(mediaError as any).status}`
                       });
 
-
                       // Update the screen's status
                       await axios.patch(`https://staging.service.dscdn.salext.net/screen/update-by-identifier`, {
                         identifier: deviceId,
@@ -150,21 +167,27 @@ const Explore = () => {
                   errorCode: `${(playlistError as any).status}`
                 });
 
-
                 // Update the screen's status
                 await axios.patch(`https://staging.service.dscdn.salext.net/screen/update-by-identifier`, {
                   identifier: deviceId,
                   status: "error",
                   statusDescription: `[${(playlistError as any).status}] Error fetching playlist with ID ${content.contentId}`
                 })
-            }
+              }
             }
           }
-
 
           // Check and update playlist items if unscheduled
           const updatedPlaylistItems = await updatePlaylistItemsIfUnscheduled(allPlaylistItems);
 
+          // If there are no valid playlist items after checking schedules, clear the playlist
+          if (updatedPlaylistItems.length === 0) {
+            setPlaylistItems([]);
+            setCurrentIndex(0);
+            setError({ generalError: null, technicalError: null, errorCode: null });
+            setIsLoading(false);
+            return;
+          }
 
           // Check if there are changes before updating state
           if (JSON.stringify(updatedPlaylistItems) !== JSON.stringify(playlistItems)) {
@@ -176,7 +199,6 @@ const Explore = () => {
             }
           }
 
-
           // Update the screen's contentVersion in the database
           await axios.patch(`https://staging.service.dscdn.salext.net/screen/update-by-identifier`, {
             identifier: deviceId,
@@ -185,7 +207,6 @@ const Explore = () => {
          
         } catch (error) {
           console.log("Error fetching playlist:", error);
-          // setError('Failed to fetch content. Please try refreshing the application.');
           setError({
             generalError: `Failed to fetch content.`,
             technicalError: `${error}`,
@@ -204,18 +225,15 @@ const Explore = () => {
       }
     };
 
-
     const intervalId = setInterval(() => {
       if (deviceId) {
         fetchAssignedPlaylist();
       }
     }, 5000);  
 
-
     // Cleanup interval on component unmount
     return () => clearInterval(intervalId);
   }, [deviceId, playlistItems, currentIndex]);
-
 
   useEffect(() => {
     console.log("playlistItems", playlistItems);
@@ -276,52 +294,97 @@ const Explore = () => {
 
   const fetchMediaUrl = async (mediaId: number) => {
     try {
+      // Check if file exists in cache
+      const cacheDir = FileSystem.cacheDirectory;
+      const fileName = `media_${mediaId}`;
+      const filePath = `${cacheDir}${fileName}`;
+      
+      // Try to read from cache first
+      const fileInfo = await FileSystem.getInfoAsync(filePath);
+      
+      if (fileInfo.exists) {
+        setMediaUrls(prev => ({ ...prev, [mediaId]: filePath }));
+        return;
+      }
+
+      // If not in cache, download and save
+      setDownloadingItems(prev => [...prev, mediaId]);
+      setDownloadProgress(prev => ({ ...prev, [mediaId]: 0 }));
+
       const s3Response = await axios.get(`https://staging.service.dscdn.salext.net/storage/media/${mediaId}/get-s3-media`);
       const s3Url = s3Response.data.s3Path;
+      
       if (s3Url) {
-        setMediaUrls(prev => ({ ...prev, [mediaId]: s3Url }));
-        return;
+        // Download and save to cache with progress tracking
+        const downloadResult = await FileSystem.createDownloadResumable(
+          s3Url,
+          filePath,
+          {},
+          (downloadProgress) => {
+            const progress = downloadProgress.totalBytesWritten / downloadProgress.totalBytesExpectedToWrite;
+            setDownloadProgress(prev => ({ ...prev, [mediaId]: progress }));
+          }
+        ).downloadAsync();
+
+        if (downloadResult?.status === 200) {
+          setMediaUrls(prev => ({ ...prev, [mediaId]: downloadResult.uri }));
+          setDownloadingItems(prev => prev.filter(id => id !== mediaId));
+          setDownloadProgress(prev => {
+            const newProgress = { ...prev };
+            delete newProgress[mediaId];
+            return newProgress;
+          });
+          return;
+        }
       }
     } catch (s3Error) {
       console.log('Error fetching S3 media:', s3Error);
       try {
+        setDownloadingItems(prev => [...prev, mediaId]);
+        setDownloadProgress(prev => ({ ...prev, [mediaId]: 0 }));
+
         const localResponse = await axios.get(`https://staging.service.dscdn.salext.net/storage/media/${mediaId}/get-local-media`, {
           responseType: 'blob',
         });
-        console.log("localResponse ", localResponse.data);
-        const reader = new FileReader();
-        reader.onload = () => {
-          const localUrl = reader.result as string;
-          setMediaUrls(prev => ({ ...prev, [mediaId]: localUrl }));
-        };
-        reader.onerror = (readError) => {
-          console.error(`Error reading local media for mediaId ${mediaId}:`, readError);
-          setError({
-            generalError: `Error reading local media for mediaId ${mediaId}`,
-            technicalError: `${readError}`,
-            errorCode: `${(readError as any).status}`
+        
+        // Save blob to cache
+        const cacheDir = FileSystem.cacheDirectory;
+        const fileName = `media_${mediaId}`;
+        const filePath = `${cacheDir}${fileName}`;
+        
+        const base64Data = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(localResponse.data);
+        });
+
+        if (typeof base64Data === 'string') {
+          await FileSystem.writeAsStringAsync(filePath, base64Data);
+          setMediaUrls(prev => ({ ...prev, [mediaId]: filePath }));
+          setDownloadingItems(prev => prev.filter(id => id !== mediaId));
+          setDownloadProgress(prev => {
+            const newProgress = { ...prev };
+            delete newProgress[mediaId];
+            return newProgress;
           });
-          // Update the screen's status
-          axios.patch(`https://staging.service.dscdn.salext.net/screen/update-by-identifier`, {
-            identifier: deviceId,
-            status: "error",
-            statusDescription: `[${(readError as any).status}] Error reading local media for mediaId ${mediaId}`
-          })
-        };
-        reader.readAsDataURL(localResponse.data);
+        }
       } catch (localError) {
         console.log('Error fetching local media:', localError);
-        setError({
-          generalError: `Error fetching media asset.`,
-          technicalError: `${localError}`,
-          errorCode: `${(localError as any).status}`
-        });  
-        // Update the screen's status
-        await axios.patch(`https://staging.service.dscdn.salext.net/screen/update-by-identifier`, {
-          identifier: deviceId,
-          status: "error",
-          statusDescription: `[${(localError as any).status}] Error fetching media asset.`
-        })
+        setDownloadingItems(prev => prev.filter(id => id !== mediaId));
+        setDownloadProgress(prev => {
+          const newProgress = { ...prev };
+          delete newProgress[mediaId];
+          return newProgress;
+        });
+        // Only set error if we don't have a cached version
+        if (!mediaUrls[mediaId]) {
+          setError({
+            generalError: `Error fetching media asset.`,
+            technicalError: `${localError}`,
+            errorCode: `${(localError as any).status}`
+          });
+        }
       }
     }
   };
@@ -618,9 +681,8 @@ const Explore = () => {
           <ActivityIndicator size="large" color="#fff" />
           <Text style={styles.loadingText}>Loading content...</Text>
         </View>
-      ) :
-      error.errorCode && error.generalError && error.technicalError ? (
-        // Error UI
+      ) : error.errorCode && error.generalError && error.technicalError && playlistItems.length === 0 ? (
+        // Error UI - Only show if we have no playlist items
         <View style={styles.errorContainer}>
           <Text style={styles.errorText}>{error.generalError}</Text>
           <Text style={styles.errorText}>{error.technicalError}</Text>
@@ -628,58 +690,74 @@ const Explore = () => {
         </View>
       ) : playlistItems.length > 0 ? (
         // Content UI
-        playlistItems[currentIndex] && (
-          <Animatable.View
-          // Fade Animations:
-          // fadeIn
-          // fadeInRight
-          // fadeInLeft
-          // fadeOut
-          // fadeOutRight
-          // fadeOutLeft
-          // Slide Animations:
-          // slideInUp
-          // slideInDown
-          // slideInLeft
-          // slideInRight
-          // slideOutUp
-          // slideOutDown
-          // slideOutLeft
-          // slideOutRight
-            animation={
-              playlistItems[currentIndex].transition === "Fade In" ? "fadeIn" :
-              playlistItems[currentIndex].transition === "Fade In Right" ? "fadeInRight" :
-              playlistItems[currentIndex].transition === "Fade In Left" ? "fadeInLeft" :
-              playlistItems[currentIndex].transition === "Slide In Up" ? "slideInUp" :
-              playlistItems[currentIndex].transition === "Slide In Down" ? "slideInDown" :
-              playlistItems[currentIndex].transition === "Slide In Left" ? "slideInLeft" :
-              playlistItems[currentIndex].transition === "Slide In Right" ? "slideInRight" :
-              "fadeIn"
-            }
-            duration={1500}
-            style={styles.mediaContainer}
-            key={playlistItems[currentIndex].id}
-          >
-            {playlistItems[currentIndex].mediaType.startsWith('video') ? (
-              <Video
-                source={{ uri: mediaUrls[playlistItems[currentIndex].mediaId] ?? '' }}
-                rate={1.0}
-                volume={1.0}
-                isMuted={false}
-                shouldPlay
-                resizeMode={ResizeMode.CONTAIN}
-                style={styles.media}
-                isLooping={true}
-              />
-            ) : (
-              <Image
-                source={{ uri: mediaUrls[playlistItems[currentIndex].mediaId] || undefined }}
-                style={styles.media}
-                resizeMode="contain"
-              />
-            )}
-          </Animatable.View>
-        )
+        <>
+          {playlistItems[currentIndex] && (
+            <Animatable.View
+              animation={
+                playlistItems[currentIndex].transition === "Fade In" ? "fadeIn" :
+                playlistItems[currentIndex].transition === "Fade In Right" ? "fadeInRight" :
+                playlistItems[currentIndex].transition === "Fade In Left" ? "fadeInLeft" :
+                playlistItems[currentIndex].transition === "Slide In Up" ? "slideInUp" :
+                playlistItems[currentIndex].transition === "Slide In Down" ? "slideInDown" :
+                playlistItems[currentIndex].transition === "Slide In Left" ? "slideInLeft" :
+                playlistItems[currentIndex].transition === "Slide In Right" ? "slideInRight" :
+                "fadeIn"
+              }
+              duration={1500}
+              style={styles.mediaContainer}
+              key={playlistItems[currentIndex].id}
+            >
+              {playlistItems[currentIndex].mediaType.startsWith('video') ? (
+                <Video
+                  source={{ uri: mediaUrls[playlistItems[currentIndex].mediaId] ?? '' }}
+                  rate={1.0}
+                  volume={1.0}
+                  isMuted={false}
+                  shouldPlay
+                  resizeMode={ResizeMode.CONTAIN}
+                  style={styles.media}
+                  isLooping={true}
+                  onError={(error) => {
+                    console.error('Video playback error:', error);
+                  }}
+                />
+              ) : (
+                <Image
+                  source={{ uri: mediaUrls[playlistItems[currentIndex].mediaId] || undefined }}
+                  style={styles.media}
+                  resizeMode="contain"
+                  onError={(error) => {
+                    console.error('Image loading error:', error);
+                  }}
+                />
+              )}
+            </Animatable.View>
+          )}
+          
+          {/* Download Progress Overlay */}
+          {downloadingItems.length > 0 && (
+            <View style={styles.downloadProgressContainer}>
+              {downloadingItems.map((mediaId) => (
+                <View key={mediaId} style={styles.downloadProgressItem}>
+                  <Text style={styles.downloadProgressText}>
+                    Downloading media {mediaId}...
+                  </Text>
+                  <View style={styles.progressBarContainer}>
+                    <View 
+                      style={[
+                        styles.progressBar,
+                        { width: `${downloadProgress[mediaId] * 100}%` }
+                      ]} 
+                    />
+                  </View>
+                  <Text style={styles.downloadProgressPercentage}>
+                    {Math.round(downloadProgress[mediaId] * 100)}%
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
+        </>
       ) : (
         // Fallback UI if no playlist items
         <View style={styles.noContentContainer}>
@@ -692,14 +770,11 @@ const Explore = () => {
         </View>
       )}
 
-
       {notification.visible && (
         <Animated.View style={[styles.notification, { opacity: fadeAnim }]}>
           <Text style={styles.notificationText}>{notification.message} Updating screen content...</Text>
         </Animated.View>
       )}
-
-
     </View>
   );
 };
@@ -792,5 +867,39 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 14,
     textAlign: 'center',
+  },
+  downloadProgressContainer: {
+    position: 'absolute',
+    bottom: 20,
+    left: 20,
+    right: 20,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    padding: 10,
+    borderRadius: 5,
+  },
+  downloadProgressItem: {
+    marginBottom: 10,
+  },
+  downloadProgressText: {
+    color: '#fff',
+    fontSize: 12,
+    marginBottom: 5,
+  },
+  progressBarContainer: {
+    height: 4,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  progressBar: {
+    height: '100%',
+    backgroundColor: '#fff',
+    borderRadius: 2,
+  },
+  downloadProgressPercentage: {
+    color: '#fff',
+    fontSize: 10,
+    textAlign: 'right',
+    marginTop: 2,
   },
 });
