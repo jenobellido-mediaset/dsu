@@ -737,24 +737,22 @@ const Explore = () => {
           {/* Download Progress Overlay */}
           {downloadingItems.length > 0 && (
             <View style={styles.downloadProgressContainer}>
-              {downloadingItems.map((mediaId) => (
-                <View key={mediaId} style={styles.downloadProgressItem}>
-                  <Text style={styles.downloadProgressText}>
-                    Downloading media {mediaId}...
-                  </Text>
-                  <View style={styles.progressBarContainer}>
-                    <View 
-                      style={[
-                        styles.progressBar,
-                        { width: `${downloadProgress[mediaId] * 100}%` }
-                      ]} 
-                    />
-                  </View>
-                  <Text style={styles.downloadProgressPercentage}>
-                    {Math.round(downloadProgress[mediaId] * 100)}%
-                  </Text>
-                </View>
-              ))}
+              <Text style={styles.downloadProgressText}>
+                Downloading content...
+              </Text>
+              <View style={styles.progressBarContainer}>
+                <View 
+                  style={[
+                    styles.progressBar,
+                    { 
+                      width: `${(Object.values(downloadProgress).reduce((a, b) => a + b, 0) / downloadingItems.length) * 100}%` 
+                    }
+                  ]} 
+                />
+              </View>
+              <Text style={styles.downloadProgressPercentage}>
+                {Math.round((Object.values(downloadProgress).reduce((a, b) => a + b, 0) / downloadingItems.length) * 100)}%
+              </Text>
             </View>
           )}
         </>
@@ -876,9 +874,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.7)',
     padding: 10,
     borderRadius: 5,
-  },
-  downloadProgressItem: {
-    marginBottom: 10,
   },
   downloadProgressText: {
     color: '#fff',
